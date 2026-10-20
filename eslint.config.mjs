@@ -13,6 +13,8 @@ export default defineConfig(
       'playwright-report/',
       'blob-report/',
       'playwright/.auth/',
+      // Copy-and-fill scaffold with placeholder names; not part of the TS project.
+      '.claude/skills/**/template.ts',
     ],
   },
 
