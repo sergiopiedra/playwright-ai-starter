@@ -16,6 +16,8 @@ import {
 import { formatViolations, WCAG_TAGS } from '@utils/a11y';
 
 interface A11yScanOptions {
+  /** axe rule tags to run. Defaults to WCAG 2.1 A + AA. */
+  tags?: string[];
   /** CSS selector to limit the scan to part of the page. */
   include?: string;
   /** CSS selectors to leave out of the scan (e.g. third-party widgets). */
@@ -23,7 +25,7 @@ interface A11yScanOptions {
 }
 
 interface A11y {
-  /** Runs axe with WCAG 2.1 AA rules and attaches the full results to the report. */
+  /** Runs axe (WCAG 2.1 AA by default) and attaches the full results to the report. */
   scan(options?: A11yScanOptions): Promise<AxeResults>;
 }
 
@@ -77,8 +79,8 @@ export const test = base.extend<PageFixtures & ApiFixtures, WorkerFixtures>({
   // --- Accessibility ------------------------------------------------------
   a11y: async ({ page }, use, testInfo) => {
     await use({
-      async scan({ include, exclude = [] } = {}) {
-        let builder = new AxeBuilder({ page }).withTags(WCAG_TAGS);
+      async scan({ tags = WCAG_TAGS, include, exclude = [] } = {}) {
+        let builder = new AxeBuilder({ page }).withTags(tags);
         if (include) builder = builder.include(include);
         for (const selector of exclude) builder = builder.exclude(selector);
 
