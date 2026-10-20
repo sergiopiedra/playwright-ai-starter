@@ -1,0 +1,182 @@
+name: Playwright Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Nightly full regression, Monday–Friday at 06:00 UTC.
+    - cron: '0 6 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      test_env:
+        description: Environment to test
+        type: choice
+        options: [dev, prod]
+        default: dev
+      grep:
+        description: Only run tests matching this tag/regex (e.g. @smoke)
+        type: string
+        default: ''
+      update_snapshots:
+        description: Regenerate ALL visual baselines (download them from the artifacts)
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  quality:
+    name: Lint, format & typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run format:check
+
+      - name: Playwright version matches the CI container
+        run: |
+          installed="$(node -p "require('@playwright/test/package.json').version")"
+          if ! grep -q "mcr.microsoft.com/playwright:v${installed}-noble" .github/workflows/playwright.yml; then
+            echo "::error title=Playwright version mismatch::@playwright/test is ${installed}; update the container image tag in playwright.yml to v${installed}-noble."
+            exit 1
+          fi
+
+  test:
+    name: test (${{ matrix.project }})
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Official image ships every browser + OS deps; one image for all projects keeps
+    # visual baselines deterministic. Keep the tag in sync with @playwright/test.
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --user 1001
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [api, chromium, firefox, webkit, mobile-chrome, mobile-safari, a11y, visual]
+    env:
+      TEST_ENV: ${{ inputs.test_env || 'dev' }}
+      GREP: ${{ inputs.grep }}
+      SNAPSHOT_MODE: ${{ inputs.update_snapshots && 'all' || 'missing' }}
+      # Empty secrets fall back to the committed .env.<TEST_ENV> defaults.
+      SAUCE_PASSWORD: ${{ secrets.SAUCE_PASSWORD }}
+      API_PASSWORD: ${{ secrets.API_PASSWORD }}
+      PLAYWRIGHT_BLOB_OUTPUT_NAME: report-${{ matrix.project }}.zip
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run Playwright (${{ matrix.project }})
+        run: |
+          args=(--project="${{ matrix.project }}" --pass-with-no-tests)
+          if [[ -n "$GREP" ]]; then args+=(--grep "$GREP"); fi
+          if [[ "${{ matrix.project }}" == "visual" ]]; then args+=(--update-snapshots="$SNAPSHOT_MODE"); fi
+          npx playwright test "${args[@]}"
+
+      - name: Upload blob report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: blob-report-${{ matrix.project }}
+          path: blob-report
+          retention-days: 7
+
+      - name: Upload traces, screenshots & videos
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-${{ matrix.project }}
+          path: test-results
+          retention-days: 14
+
+      - name: Detect new or updated visual baselines
+        id: baselines
+        if: ${{ !cancelled() && matrix.project == 'visual' }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          changed="$(git status --porcelain -- tests/__screenshots__ | wc -l | tr -d ' ')"
+          echo "changed=${changed}" >> "$GITHUB_OUTPUT"
+          if [[ "$changed" != "0" ]]; then
+            echo "::warning title=Visual baselines::${changed} baseline(s) were written. Download the 'visual-baselines' artifact and commit it under tests/__screenshots__/."
+          fi
+
+      - name: Upload visual baselines
+        if: ${{ !cancelled() && steps.baselines.outputs.changed != '0' && steps.baselines.outputs.changed != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: visual-baselines
+          path: tests/__screenshots__
+          retention-days: 14
+
+  report:
+    name: Merge HTML report
+    needs: test
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - name: Download blob reports
+        uses: actions/download-artifact@v8
+        with:
+          pattern: blob-report-*
+          path: all-blob-reports
+          merge-multiple: true
+
+      - name: Merge into a single HTML report
+        run: npx playwright merge-reports --reporter html ./all-blob-reports
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: playwright-report
+          retention-days: 14
+
+      - name: Job summary
+        env:
+          TEST_ENV: ${{ inputs.test_env || 'dev' }}
+          GREP: ${{ inputs.grep }}
+        run: |
+          {
+            echo "### Playwright report"
+            echo "Environment: \`${TEST_ENV}\`"
+            if [[ -n "$GREP" ]]; then echo "Filter: \`${GREP}\`"; fi
+            echo ""
+            echo "Download the **playwright-report** artifact, unzip it and run \`npx playwright show-report <folder>\`."
+          } >> "$GITHUB_STEP_SUMMARY"
