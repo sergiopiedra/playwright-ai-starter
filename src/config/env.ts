@@ -5,15 +5,7 @@ import { z } from 'zod';
 export const TEST_ENVS = ['dev', 'prod'] as const;
 export type TestEnv = (typeof TEST_ENVS)[number];
 
-const testEnv: TestEnv = z.enum(TEST_ENVS).parse(process.env.TEST_ENV ?? 'dev');
-
-// dotenv never overrides, so the first source to define a key wins:
-// real environment variables > .env.local > .env.<TEST_ENV>
-const root = path.resolve(__dirname, '../..');
-dotenv.config({
-  path: [path.join(root, '.env.local'), path.join(root, `.env.${testEnv}`)],
-  quiet: true,
-});
+const testEnv: TestEnv = z.enum(TEST_ENVS).parse(process.env.TEST_ENV || 'dev');
 
 const booleanString = z.enum(['true', 'false']).transform((value) => value === 'true');
 
@@ -24,6 +16,20 @@ const schema = z.object({
   API_USERNAME: z.string().min(1),
   API_PASSWORD: z.string().min(1, 'API_PASSWORD is required (set it in .env.local or CI)'),
   ALLOW_DATA_MUTATION: booleanString.default(false),
+});
+
+// CI exposes unset secrets as empty strings. Treat them as missing so the .env files
+// can still provide defaults (dotenv skips any key that already exists).
+for (const key of Object.keys(schema.shape)) {
+  if (process.env[key] === '') delete process.env[key];
+}
+
+// dotenv never overrides, so the first source to define a key wins:
+// real environment variables > .env.local > .env.<TEST_ENV>
+const root = path.resolve(__dirname, '../..');
+dotenv.config({
+  path: [path.join(root, '.env.local'), path.join(root, `.env.${testEnv}`)],
+  quiet: true,
 });
 
 const parsed = schema.safeParse(process.env);
