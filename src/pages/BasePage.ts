@@ -18,9 +18,11 @@ export abstract class BasePage {
 
   /** Navigates directly to this page and waits until it is ready. */
   async goto(): Promise<void> {
-    // Don't wait for `load`: third-party assets can stall it. `expectLoaded()` is the
-    // real readiness signal.
-    await this.page.goto(this.path, { waitUntil: 'domcontentloaded' });
+    // Sauce Demo serves deep links through a 404 page that redirects into the SPA
+    // (spa-github-pages). `goto` would resolve on that throwaway document, so we only
+    // wait for the commit and then for the *final* document's load event.
+    await this.page.goto(this.path, { waitUntil: 'commit' });
+    await this.page.waitForLoadState('load');
     await this.expectLoaded();
   }
 
